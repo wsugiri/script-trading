@@ -1,0 +1,633 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © wsugiri
+
+//@version=5
+indicator("Multi-Asset Trading Indicator", overlay=true)
+
+// =================== INPUT PARAMETERS ===================
+
+// Symbol-specific adjustments
+symbolGroup = "Symbol Settings"
+instrumentType = input.string("Gold", "Instrument Type", options=["Gold", "Bitcoin", "Forex", "Stock", "Custom"], group=symbolGroup)
+customVolatility = input.float(1.0, "Custom Volatility Factor", minval=0.1, step=0.1, group=symbolGroup, tooltip="Multiplier for adjusting to different assets' volatility")
+
+// Timeframe settings
+tfGroup = "Timeframe Settings"
+timeframeOption = input.string("Auto", "Timeframe Optimization", options=["Auto", "M5", "M15", "H1", "H4", "D1"], group=tfGroup)
+adaptTimeframe = input.bool(true, "Auto-adapt to timeframe", group=tfGroup, tooltip="Automatically adjust parameters based on timeframe")
+
+// Alert settings
+alertGroup = "Alert Settings"
+enableTrendAlerts = input.bool(true, "Enable Trend Change Alerts", group=alertGroup)
+enableSRAlerts = input.bool(true, "Enable S/R Break Alerts", group=alertGroup)
+alertLookback = input.int(3, "Bars to Confirm Trend Change", minval=1, maxval=10, group=alertGroup)
+showAlertMessages = input.bool(true, "Show Alert Messages on Chart", group=alertGroup)
+
+// Indicator parameters
+indicatorGroup = "Indicator Parameters"
+rsiLength = input.int(14, "RSI Period", minval=1, group=indicatorGroup)
+rsiOverbought = input.int(70, "RSI Overbought Level", minval=50, maxval=100, group=indicatorGroup)
+rsiOversold = input.int(30, "RSI Oversold Level", minval=0, maxval=50, group=indicatorGroup)
+maFast = input.int(9, "Fast EMA Period", minval=1, group=indicatorGroup)
+maMedium = input.int(21, "Medium EMA Period", minval=1, group=indicatorGroup)
+maSlow = input.int(50, "Slow EMA Period", minval=1, group=indicatorGroup)
+atrPeriod = input.int(14, "ATR Period", minval=1, group=indicatorGroup)
+volumeMALength = input.int(20, "Volume MA Length", minval=1, group=indicatorGroup)
+
+// Signal filter settings
+filterGroup = "Signal Filters"
+useMACD = input.bool(true, "Use MACD for Confirmation", group=filterGroup)
+useVolume = input.bool(true, "Use Volume Confirmation", group=filterGroup)
+useBollingerBands = input.bool(true, "Use Bollinger Bands", group=filterGroup)
+volatilityMultiplier = input.float(1.2, "Volatility Multiplier", minval=1.0, step=0.1, group=filterGroup)
+
+// Trend analysis settings
+trendGroup = "Trend Analysis"
+trendEMA = input.int(200, "Trend EMA Length", minval=50, maxval=500, group=trendGroup)
+showHigherTFTrend = input.bool(true, "Show Higher Timeframe Trend", group=trendGroup)
+higherTF = input.string("D", "Higher Timeframe for Trend", options=["60", "240", "D", "W"], group=trendGroup)
+
+// Risk management settings
+riskGroup = "Risk Management"
+atrMultiplier = input.float(2.0, "ATR Multiplier for Stop Loss", minval=0.1, step=0.1, group=riskGroup)
+tp1Multiplier = input.float(2.0, "TP1 ATR Multiplier", minval=0.5, step=0.1, group=riskGroup)
+tp2Multiplier = input.float(3.0, "TP2 ATR Multiplier", minval=1.0, step=0.1, group=riskGroup)
+tp3Multiplier = input.float(5.0, "TP3 ATR Multiplier", minval=2.0, step=0.1, group=riskGroup)
+useFibTargets = input.bool(false, "Use Fibonacci Targets", group=riskGroup, tooltip="Use Fibonacci extension levels instead of ATR for targets")
+
+// Support/Resistance settings
+srGroup = "Support & Resistance"
+sr_method = input.string("Pivot Points", "S/R Calculation Method", options=["Pivot Points", "Fibonacci"], group=srGroup)
+pivotLookbackBase = input.int(20, "Base Pivot Lookback", minval=5, maxval=50, group=srGroup)
+
+// Visual settings
+visualGroup = "Visual Settings"
+showPriceLevels = input.bool(true, "Show Price Levels on Chart", group=visualGroup)
+showTrendLabels = input.bool(true, "Show Trend Labels", group=visualGroup)
+bullColor = input.color(color.green, "Bullish Signal Color", group=visualGroup)
+bearColor = input.color(color.red, "Bearish Signal Color", group=visualGroup)
+
+// =================== DYNAMIC ADJUSTMENTS ===================
+
+// Apply instrument-specific volatility adjustments
+var float volatilityFactor = 1.0
+
+if instrumentType == "Gold"
+    volatilityFactor := 1.0
+else if instrumentType == "Bitcoin"
+    volatilityFactor := 1.5  // Bitcoin typically has higher volatility
+else if instrumentType == "Forex"
+    volatilityFactor := 0.8  // Major forex pairs often have lower volatility than gold
+else if instrumentType == "Stock"
+    volatilityFactor := 1.2  // Stocks can vary, but generally moderate volatility
+else // Custom
+    volatilityFactor := customVolatility
+
+// Dynamic timeframe pivots adjustment
+currentTimeframe = timeframe.period
+var int pivotLookback = pivotLookbackBase
+
+// Adjust parameters based on selected timeframe and asset
+if adaptTimeframe
+    if timeframeOption == "Auto"
+        if currentTimeframe == "5" or currentTimeframe == "15"  // M5 or M15
+            pivotLookback := pivotLookbackBase
+        else if currentTimeframe == "60" or currentTimeframe == "240"  // H1 or H4
+            pivotLookback := math.round(pivotLookbackBase * 0.6)
+        else  // D1 or higher
+            pivotLookback := math.round(pivotLookbackBase * 0.4)
+    else
+        if timeframeOption == "M5" or timeframeOption == "M15"
+            pivotLookback := pivotLookbackBase
+        else if timeframeOption == "H1" or timeframeOption == "H4"
+            pivotLookback := math.round(pivotLookbackBase * 0.6)
+        else
+            pivotLookback := math.round(pivotLookbackBase * 0.4)
+
+// =================== INDICATOR CALCULATIONS ===================
+
+// Basic indicators
+rsiValue = ta.rsi(close, rsiLength)
+emaFast = ta.ema(close, maFast)
+emaMedium = ta.ema(close, maMedium)
+emaSlow = ta.ema(close, maSlow)
+atr = ta.atr(atrPeriod) * volatilityFactor  // Apply volatility factor to ATR
+
+// Trend analysis
+ema_trend = ta.ema(close, trendEMA)
+current_trend = close > ema_trend ? "BULLISH" : "BEARISH"
+trend_strength = math.abs(close - ema_trend) / close * 100
+
+// Higher timeframe trend
+higher_tf_close = showHigherTFTrend ? request.security(syminfo.tickerid, higherTF, close, barmerge.gaps_off, barmerge.lookahead_off) : close
+higher_tf_ema = showHigherTFTrend ? request.security(syminfo.tickerid, higherTF, ta.ema(close, trendEMA), barmerge.gaps_off, barmerge.lookahead_off) : ema_trend
+higher_tf_trend = higher_tf_close > higher_tf_ema ? "BULLISH" : "BEARISH"
+
+// Volume analysis - with safety check for symbols without volume data
+hasVolume = volume > 0
+volumeMA = ta.sma(volume, volumeMALength)
+volumeIncreasing = hasVolume ? volume > volumeMA and volume > volume[1] : true
+
+// MACD calculation
+macdFast = ta.ema(close, 12)
+macdSlow = ta.ema(close, 26)
+macdLine = macdFast - macdSlow
+signalLine = ta.ema(macdLine, 9)
+histLine = macdLine - signalLine
+macdCrossover = ta.crossover(macdLine, signalLine)
+macdCrossunder = ta.crossunder(macdLine, signalLine)
+
+// Bollinger Bands
+bbLength = 20
+bbMult = 2.0
+bbBasis = ta.sma(close, bbLength)
+bbDev = bbMult * ta.stdev(close, bbLength)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbRange = bbUpper - bbLower
+bbPrevRange = ta.sma(bbRange, 50)
+isRangebound = close > bbLower and close < bbUpper and bbRange < bbPrevRange
+
+// =================== TREND CHANGE DETECTION ===================
+
+// Track previous trends for change detection
+var previous_trend = current_trend
+var previous_htf_trend = higher_tf_trend
+
+// Check for trend changes
+trend_changed = current_trend != previous_trend
+htf_trend_changed = higher_tf_trend != previous_htf_trend
+
+// Confirm trend changes to avoid false signals
+bullishCount = 0
+bearishCount = 0
+for i = 0 to alertLookback
+    if close[i] > ema_trend[i]
+        bullishCount += 1
+    else
+        bearishCount += 1
+
+confirmedBullishTrend = bullishCount == alertLookback + 1
+confirmedBearishTrend = bearishCount == alertLookback + 1
+newTrendConfirmed = (current_trend == "BULLISH" and confirmedBullishTrend and previous_trend == "BEARISH") or (current_trend == "BEARISH" and confirmedBearishTrend and previous_trend == "BULLISH")
+
+// Update previous trend after checking for changes
+if barstate.islast
+    previous_trend := current_trend
+    previous_htf_trend := higher_tf_trend
+
+// =================== SUPPORT & RESISTANCE LEVELS ===================
+
+// Identify pivot points
+pivotHigh = ta.highest(high, pivotLookback)
+pivotLow = ta.lowest(low, pivotLookback)
+
+// Primary S/R levels
+var supportLevel = 0.0  // S1
+var resistanceLevel = 0.0  // R1
+
+// Additional S/R levels
+var support2 = 0.0
+var support3 = 0.0
+var resistance2 = 0.0
+var resistance3 = 0.0
+
+// Calculate S/R based on selected method
+if sr_method == "Pivot Points"
+    // Basic pivot point calculation
+    pivot_pp = (high + low + close) / 3
+    
+    // Main levels
+    if ta.change(pivotHigh) != 0
+        resistanceLevel := pivotHigh  // R1
+        resistance2 := pivot_pp + (pivotHigh - pivotLow)  // R2
+        resistance3 := pivot_pp + 2 * (pivotHigh - pivotLow)  // R3
+    
+    if ta.change(pivotLow) != 0
+        supportLevel := pivotLow  // S1
+        support2 := pivot_pp - (pivotHigh - pivotLow)  // S2
+        support3 := pivot_pp - 2 * (pivotHigh - pivotLow)  // S3
+else  // Fibonacci method
+    if ta.change(pivotHigh) != 0
+        resistanceLevel := pivotHigh  // R1
+        price_range = pivotHigh - pivotLow
+        resistance2 := pivotHigh + 0.618 * price_range  // R2 (61.8% extension)
+        resistance3 := pivotHigh + price_range  // R3 (100% extension)
+    
+    if ta.change(pivotLow) != 0
+        supportLevel := pivotLow  // S1
+        price_range = pivotHigh - pivotLow
+        support2 := pivotLow - 0.618 * price_range  // S2 (61.8% extension)
+        support3 := pivotLow - price_range  // S3 (100% extension)
+
+// Detect S/R breaks
+resistanceBreak = ta.crossover(close, resistanceLevel) and close > resistanceLevel
+supportBreak = ta.crossunder(close, supportLevel) and close < supportLevel
+
+// =================== TRADING SIGNALS ===================
+
+// Higher timeframe trend alignment variables
+bool isHigherTFBullish = higher_tf_trend == "BULLISH"
+bool isHigherTFBearish = higher_tf_trend == "BEARISH"
+
+// Signal conditions with trend alignment
+bullishSignal = emaFast > emaMedium and emaMedium > emaSlow and rsiValue < 50 and rsiValue > rsiOversold
+bullishSignal := useMACD ? bullishSignal and macdCrossover : bullishSignal
+bullishSignal := showHigherTFTrend and isHigherTFBearish ? bullishSignal and rsiValue < 40 : bullishSignal
+
+bearishSignal = emaFast < emaMedium and emaMedium < emaSlow and rsiValue > 50 and rsiValue < rsiOverbought
+bearishSignal := useMACD ? bearishSignal and macdCrossunder : bearishSignal
+bearishSignal := showHigherTFTrend and isHigherTFBullish ? bearishSignal and rsiValue > 60 : bearishSignal
+
+// Strong signals with additional filters
+strongBullish = bullishSignal
+strongBullish := useVolume ? strongBullish and volumeIncreasing : strongBullish
+strongBullish := useBollingerBands ? strongBullish and not isRangebound : strongBullish
+
+strongBearish = bearishSignal
+strongBearish := useVolume ? strongBearish and volumeIncreasing : strongBearish
+strongBearish := useBollingerBands ? strongBearish and not isRangebound : strongBearish
+
+// =================== ENTRY & EXIT LEVELS ===================
+
+// Track signal events
+var lastSignalPrice = 0.0
+var lastSignalType = "NONE"
+var recommendedEntry = 0.0
+
+// Dynamic ATR-based entry factor adjustment
+var atr_entry_factor = 0.3  // Default
+
+// Adjust ATR factor based on timeframe and asset type
+if adaptTimeframe
+    // Base adjustment on timeframe
+    if timeframeOption == "Auto"
+        if currentTimeframe == "5"  // M5
+            atr_entry_factor := 0.2 * volatilityFactor
+        else if currentTimeframe == "15"  // M15
+            atr_entry_factor := 0.3 * volatilityFactor
+        else if currentTimeframe == "60"  // H1
+            atr_entry_factor := 0.4 * volatilityFactor
+        else if currentTimeframe == "240"  // H4
+            atr_entry_factor := 0.5 * volatilityFactor
+        else  // D1 or higher
+            atr_entry_factor := 0.6 * volatilityFactor
+    else
+        if timeframeOption == "M5"
+            atr_entry_factor := 0.2 * volatilityFactor
+        else if timeframeOption == "M15"
+            atr_entry_factor := 0.3 * volatilityFactor
+        else if timeframeOption == "H1"
+            atr_entry_factor := 0.4 * volatilityFactor
+        else if timeframeOption == "H4"
+            atr_entry_factor := 0.5 * volatilityFactor
+        else
+            atr_entry_factor := 0.6 * volatilityFactor
+
+// Safe entry points
+safeBuyEntry = supportLevel + (atr * atr_entry_factor)
+safeSellEntry = resistanceLevel - (atr * atr_entry_factor)
+
+// Safer entries near stronger S/R
+saferBuyEntry = math.max(supportLevel, support2) + (atr * atr_entry_factor * 1.5)
+saferSellEntry = math.min(resistanceLevel, resistance2) - (atr * atr_entry_factor * 1.5)
+
+// Update signal and recommended entry points
+if strongBullish
+    lastSignalPrice := close
+    lastSignalType := "STRONG BUY"
+    recommendedEntry := math.min(close - (atr * atr_entry_factor), safeBuyEntry)
+else if bullishSignal
+    lastSignalPrice := close
+    lastSignalType := "BUY"
+    recommendedEntry := safeBuyEntry
+else if strongBearish
+    lastSignalPrice := close
+    lastSignalType := "STRONG SELL"
+    recommendedEntry := math.max(close + (atr * atr_entry_factor), safeSellEntry)
+else if bearishSignal
+    lastSignalPrice := close
+    lastSignalType := "SELL"
+    recommendedEntry := safeSellEntry
+
+// Calculate stop loss levels
+longStopLevel = math.min(low - atr * atrMultiplier, support2)
+shortStopLevel = math.max(high + atr * atrMultiplier, resistance2)
+
+// Calculate take profit levels
+// Safe buy TPs
+safeBuyTP1 = useFibTargets ? safeBuyEntry + (pivotHigh - pivotLow) : safeBuyEntry + (atr * tp1Multiplier)
+safeBuyTP2 = useFibTargets ? safeBuyEntry + 1.618 * (pivotHigh - pivotLow) : safeBuyEntry + (atr * tp2Multiplier)
+safeBuyTP3 = useFibTargets ? safeBuyEntry + 2.618 * (pivotHigh - pivotLow) : safeBuyEntry + (atr * tp3Multiplier)
+
+// Safe sell TPs
+safeSellTP1 = useFibTargets ? safeSellEntry - (pivotHigh - pivotLow) : safeSellEntry - (atr * tp1Multiplier)
+safeSellTP2 = useFibTargets ? safeSellEntry - 1.618 * (pivotHigh - pivotLow) : safeSellEntry - (atr * tp2Multiplier)
+safeSellTP3 = useFibTargets ? safeSellEntry - 2.618 * (pivotHigh - pivotLow) : safeSellEntry - (atr * tp3Multiplier)
+
+// Signal-based TPs
+buyTP1 = useFibTargets ? recommendedEntry + (pivotHigh - pivotLow) : recommendedEntry + (atr * tp1Multiplier)
+buyTP2 = useFibTargets ? recommendedEntry + 1.618 * (pivotHigh - pivotLow) : recommendedEntry + (atr * tp2Multiplier)
+buyTP3 = useFibTargets ? recommendedEntry + 2.618 * (pivotHigh - pivotLow) : recommendedEntry + (atr * tp3Multiplier)
+
+sellTP1 = useFibTargets ? recommendedEntry - (pivotHigh - pivotLow) : recommendedEntry - (atr * tp1Multiplier)
+sellTP2 = useFibTargets ? recommendedEntry - 1.618 * (pivotHigh - pivotLow) : recommendedEntry - (atr * tp2Multiplier)
+sellTP3 = useFibTargets ? recommendedEntry - 2.618 * (pivotHigh - pivotLow) : recommendedEntry - (atr * tp3Multiplier)
+
+// =================== PLOTTING ===================
+
+// Plot EMAs for trend visualization
+plot(emaFast, "Fast EMA", color=color.blue)
+plot(emaMedium, "Medium EMA", color=color.purple)
+plot(emaSlow, "Slow EMA", color=color.red)
+plot(ema_trend, "Trend EMA", color=color.yellow, linewidth=2)
+
+// Bollinger Bands
+bbUpperPlot = plot(useBollingerBands ? bbUpper : na, "BB Upper", color=color.gray, linewidth=1)
+bbLowerPlot = plot(useBollingerBands ? bbLower : na, "BB Lower", color=color.gray, linewidth=1)
+
+// Signal plots
+plotshape(strongBullish, "Strong Buy Signal", shape.triangleup, location.belowbar, bullColor, size=size.small)
+plotshape(strongBearish, "Strong Sell Signal", shape.triangledown, location.abovebar, bearColor, size=size.small)
+
+// RSI levels
+hline(rsiOverbought, "RSI Overbought", color=color.red, linestyle=hline.style_dotted)
+hline(rsiOversold, "RSI Oversold", color=color.green, linestyle=hline.style_dotted)
+
+// =================== ALERT CONDITIONS ===================
+// Perbaikan alert conditions dengan string literal untuk message
+alertcondition(strongBullish, "Strong Buy Signal", "Strong Buy Signal Triggered")
+alertcondition(strongBearish, "Strong Sell Signal", "Strong Sell Signal Triggered") 
+alertcondition(bullishSignal, "Buy Signal", "Buy Signal Triggered")
+alertcondition(bearishSignal, "Sell Signal", "Sell Signal Triggered")
+
+// Trend change alerts
+alertcondition(newTrendConfirmed and current_trend == "BULLISH", "New Bullish Trend", "New BULLISH Trend Confirmed")
+alertcondition(newTrendConfirmed and current_trend == "BEARISH", "New Bearish Trend", "New BEARISH Trend Confirmed")
+
+// Higher timeframe trend change alerts
+alertcondition(htf_trend_changed and higher_tf_trend == "BULLISH", "Higher TF Bullish Trend", "New BULLISH Trend on Higher Timeframe")
+alertcondition(htf_trend_changed and higher_tf_trend == "BEARISH", "Higher TF Bearish Trend", "New BEARISH Trend on Higher Timeframe")
+
+// Support/Resistance break alerts
+alertcondition(resistanceBreak, "Resistance Breakout", "BREAKOUT above Resistance")
+alertcondition(supportBreak, "Support Breakdown", "BREAKDOWN below Support")
+
+// =================== INFO DISPLAY ===================
+
+// Format variables
+signalText = "NEUTRAL"
+signalColor = color.white
+
+if strongBullish
+    signalText := "STRONG BUY"
+    signalColor := bullColor
+else if strongBearish
+    signalText := "STRONG SELL"
+    signalColor := bearColor
+else if bullishSignal
+    signalText := "BUY"
+    signalColor := bullColor
+else if bearishSignal
+    signalText := "SELL"
+    signalColor := bearColor
+
+// Trend colors
+trendColor = current_trend == "BULLISH" ? bullColor : bearColor
+higherTrendColor = higher_tf_trend == "BULLISH" ? bullColor : bearColor
+
+// Helper function for timeframe display
+getTimeframeDisplay(tf) =>
+    if tf == "5"
+        "M5"
+    else if tf == "15"
+        "M15"
+    else if tf == "60"
+        "H1"
+    else if tf == "120"
+        "H2"
+    else if tf == "240"
+        "H4"
+    else if tf == "D"
+        "D1"
+    else if tf == "W"
+        "W1"
+    else
+        tf
+
+// Create summary table
+var table infoTable = table.new(position.top_right, 4, 13, bgcolor=color.new(color.black, 0), frame_color=color.white, frame_width=1, border_color=color.gray, border_width=1)
+
+// Display information on chart
+if barstate.islast
+    // First clear existing content
+    table.clear(infoTable, 0, 0)
+    
+    // Table header with symbol and timeframe
+    tfText = timeframeOption == "Auto" ? getTimeframeDisplay(currentTimeframe) : timeframeOption
+    symbolText = instrumentType == "Custom" ? syminfo.ticker : instrumentType
+    table.cell(infoTable, 0, 0, symbolText + " " + tfText + " TRADING SIGNAL", text_color=color.white, bgcolor=color.blue, text_halign=text.align_center)
+    table.merge_cells(infoTable, 0, 0, 3, 0)
+    
+    // Current price & ATR
+    table.cell(infoTable, 0, 1, "Price:", text_color=color.white)
+    table.cell(infoTable, 1, 1, str.tostring(close, "#.##"), text_color=color.yellow)
+    table.cell(infoTable, 2, 1, "ATR:", text_color=color.white)
+    table.cell(infoTable, 3, 1, str.tostring(atr, "#.##"), text_color=color.yellow)
+    
+    // Signal status
+    table.cell(infoTable, 0, 2, "Signal:", text_color=color.white)
+    table.cell(infoTable, 1, 2, signalText, text_color=signalColor, bgcolor=color.new(color.black, 0))
+    table.cell(infoTable, 2, 2, "RSI:", text_color=color.white)
+    table.cell(infoTable, 3, 2, str.tostring(rsiValue, "#.##"), text_color=rsiValue > rsiOverbought ? color.red : rsiValue < rsiOversold ? color.green : color.white)
+    
+    // Trend information with change indicators
+    trendChangeText = newTrendConfirmed ? "⚠️ NEW TREND!" : ""
+    table.cell(infoTable, 0, 3, "Trend:", text_color=color.white)
+    table.cell(infoTable, 1, 3, current_trend + " " + trendChangeText, text_color=trendColor, bgcolor=color.new(color.black, 0))
+    table.cell(infoTable, 2, 3, getTimeframeDisplay(higherTF) + " Trend:", text_color=color.white)
+    
+    htfChangeText = htf_trend_changed ? "⚠️ NEW!" : ""
+    table.cell(infoTable, 3, 3, higher_tf_trend + " " + htfChangeText, text_color=higherTrendColor, bgcolor=color.new(color.black, 0))
+    
+    // Support & Resistance with break indicators
+    rBreakText = resistanceBreak ? "BREAK! ↑" : ""
+    sBreakText = supportBreak ? "BREAK! ↓" : ""
+    
+    table.cell(infoTable, 0, 4, "R1:", text_color=color.white)
+    table.cell(infoTable, 1, 4, str.tostring(resistanceLevel, "#.##") + " " + rBreakText, text_color=color.red)
+    table.cell(infoTable, 2, 4, "S1:", text_color=color.white)
+    table.cell(infoTable, 3, 4, str.tostring(supportLevel, "#.##") + " " + sBreakText, text_color=color.green)
+    
+    // Secondary S/R levels
+    table.cell(infoTable, 0, 5, "R2:", text_color=color.white)
+    table.cell(infoTable, 1, 5, str.tostring(resistance2, "#.##"), text_color=color.red)
+    table.cell(infoTable, 2, 5, "S2:", text_color=color.white)
+    table.cell(infoTable, 3, 5, str.tostring(support2, "#.##"), text_color=color.green)
+    
+    // Tertiary S/R levels
+    table.cell(infoTable, 0, 6, "R3:", text_color=color.white)
+    table.cell(infoTable, 1, 6, str.tostring(resistance3, "#.##"), text_color=color.red)
+    table.cell(infoTable, 2, 6, "S3:", text_color=color.white)
+    table.cell(infoTable, 3, 6, str.tostring(support3, "#.##"), text_color=color.green)
+    
+    // Safe entry levels
+    table.cell(infoTable, 0, 7, "Safe Buy:", text_color=color.white, bgcolor=color.new(bullColor, 90))
+    table.cell(infoTable, 1, 7, str.tostring(safeBuyEntry, "#.##"), text_color=bullColor)
+    table.cell(infoTable, 2, 7, "Safe Sell:", text_color=color.white, bgcolor=color.new(bearColor, 90))
+    table.cell(infoTable, 3, 7, str.tostring(safeSellEntry, "#.##"), text_color=bearColor)
+    
+    // Buy TP levels
+    table.cell(infoTable, 0, 8, "Buy TP1:", text_color=color.white)
+    table.cell(infoTable, 1, 8, str.tostring(safeBuyTP1, "#.##"), text_color=bullColor)
+    table.cell(infoTable, 2, 8, "Buy TP2:", text_color=color.white)
+    table.cell(infoTable, 3, 8, str.tostring(safeBuyTP2, "#.##"), text_color=bullColor)
+    
+    // Sell TP levels
+    table.cell(infoTable, 0, 9, "Sell TP1:", text_color=color.white)
+    table.cell(infoTable, 1, 9, str.tostring(safeSellTP1, "#.##"), text_color=bearColor)
+    table.cell(infoTable, 2, 9, "Sell TP2:", text_color=color.white)
+    table.cell(infoTable, 3, 9, str.tostring(safeSellTP2, "#.##"), text_color=bearColor)
+
+    // TP3 levels
+    table.cell(infoTable, 0, 10, "Buy TP3:", text_color=color.white)
+    table.cell(infoTable, 1, 10, str.tostring(safeBuyTP3, "#.##"), text_color=bullColor)
+    table.cell(infoTable, 2, 10, "Sell TP3:", text_color=color.white)
+    table.cell(infoTable, 3, 10, str.tostring(safeSellTP3, "#.##"), text_color=bearColor)
+
+    // Risk-reward ratio calculation
+    var float buyRR = 0.0
+    var float sellRR = 0.0
+
+    if lastSignalType == "BUY" or lastSignalType == "STRONG BUY"
+        if longStopLevel < recommendedEntry and recommendedEntry < buyTP2
+            buyRR := (buyTP2 - recommendedEntry) / (recommendedEntry - longStopLevel)
+            
+        table.cell(infoTable, 0, 11, "Buy Entry:", text_color=color.white, bgcolor=color.new(bullColor, 80))
+        table.cell(infoTable, 1, 11, str.tostring(recommendedEntry, "#.##"), text_color=bullColor)
+        table.cell(infoTable, 2, 11, "Stop:", text_color=color.white)
+        table.cell(infoTable, 3, 11, str.tostring(longStopLevel, "#.##") + " (RR: " + str.tostring(buyRR, "#.#") + ")", text_color=color.red)
+        
+        // Additional info about profit potential
+        table.cell(infoTable, 0, 12, "Potential:", text_color=color.white)
+        table.cell(infoTable, 1, 12, str.tostring(math.round((buyTP1 - recommendedEntry) / recommendedEntry * 10000) / 100, "#.##") + "%", text_color=bullColor)
+        table.cell(infoTable, 2, 12, "to", text_color=color.white)
+        table.cell(infoTable, 3, 12, str.tostring(math.round((buyTP3 - recommendedEntry) / recommendedEntry * 10000) / 100, "#.##") + "%", text_color=bullColor)
+
+    else if lastSignalType == "SELL" or lastSignalType == "STRONG SELL"
+        if shortStopLevel > recommendedEntry and recommendedEntry > sellTP2
+            sellRR := (recommendedEntry - sellTP2) / (shortStopLevel - recommendedEntry)
+            
+        table.cell(infoTable, 0, 11, "Sell Entry:", text_color=color.white, bgcolor=color.new(bearColor, 80))
+        table.cell(infoTable, 1, 11, str.tostring(recommendedEntry, "#.##"), text_color=bearColor)
+        table.cell(infoTable, 2, 11, "Stop:", text_color=color.white)
+        table.cell(infoTable, 3, 11, str.tostring(shortStopLevel, "#.##") + " (RR: " + str.tostring(sellRR, "#.#") + ")", text_color=color.red)
+        
+        // Additional info about profit potential
+        table.cell(infoTable, 0, 12, "Potential:", text_color=color.white)
+        table.cell(infoTable, 1, 12, str.tostring(math.round((recommendedEntry - sellTP1) / recommendedEntry * 10000) / 100, "#.##") + "%", text_color=bearColor)
+        table.cell(infoTable, 2, 12, "to", text_color=color.white)
+        table.cell(infoTable, 3, 12, str.tostring(math.round((recommendedEntry - sellTP3) / recommendedEntry * 10000) / 100, "#.##") + "%", text_color=bearColor)
+    else
+        table.cell(infoTable, 0, 11, "Waiting for signal", text_color=color.yellow, text_halign=text.align_center)
+        table.merge_cells(infoTable, 0, 11, 3, 11)
+        
+        // Suggestion based on current trend
+        table.cell(infoTable, 0, 12, "Suggestion:", text_color=color.white)
+        if current_trend == "BULLISH" and higher_tf_trend == "BULLISH"
+            table.cell(infoTable, 1, 12, "Look for BUY opportunities near support", text_color=bullColor, text_halign=text.align_center)
+        else if current_trend == "BEARISH" and higher_tf_trend == "BEARISH"
+            table.cell(infoTable, 1, 12, "Look for SELL opportunities near resistance", text_color=bearColor, text_halign=text.align_center)
+        else
+            table.cell(infoTable, 1, 12, "Wait for trend alignment", text_color=color.yellow, text_halign=text.align_center)
+        table.merge_cells(infoTable, 1, 12, 3, 12)
+
+
+// Display trend change labels on chart if enabled
+if showTrendLabels and showAlertMessages
+    var label trendChangeLabel = label.new(na, na, "", style=label.style_label_down, textcolor=color.white, color=color.blue, size=size.normal)
+    
+    if barstate.islast
+        if newTrendConfirmed
+            label.set_xy(trendChangeLabel, bar_index, high + (atr * 3))
+            label.set_text(trendChangeLabel, "⚠️ NEW " + current_trend + " TREND CONFIRMED!\n" + 
+                          "Strength: " + str.tostring(trend_strength, "#.##") + "%")
+            label.set_color(trendChangeLabel, current_trend == "BULLISH" ? color.new(bullColor, 40) : color.new(bearColor, 40))
+            label.set_textcolor(trendChangeLabel, color.white)
+        else
+            label.set_xy(trendChangeLabel, bar_index, high + (atr * 3))
+            label.set_text(trendChangeLabel, "")
+    
+    // Show resistance/support break labels
+    var label breakoutLabel = label.new(na, na, "", style=label.style_label_down, textcolor=color.white, color=color.blue, size=size.normal)
+    
+    if barstate.islast and enableSRAlerts
+        if resistanceBreak
+            label.set_xy(breakoutLabel, bar_index - 2, high + (atr * 1.5))
+            label.set_text(breakoutLabel, "🔼 RESISTANCE BREAKOUT!\n" + str.tostring(resistanceLevel, "#.##"))
+            label.set_color(breakoutLabel, color.new(bullColor, 40))
+        else if supportBreak
+            label.set_xy(breakoutLabel, bar_index - 2, low - (atr * 1.5))
+            label.set_text(breakoutLabel, "🔽 SUPPORT BREAKDOWN!\n" + str.tostring(supportLevel, "#.##"))
+            label.set_color(breakoutLabel, color.new(bearColor, 40))
+        else
+            label.set_text(breakoutLabel, "")
+    
+    // NEW: Show Supply & Demand Areas and Trading Recommendations
+    var label supplyDemandLabel = label.new(na, na, "", style=label.style_label_left, textcolor=color.white, color=color.black, size=size.normal)
+    
+    if barstate.islast
+        // Define Demand Zone (support areas where buyers are likely active)
+        demandZoneHigh = math.max(supportLevel, safeBuyEntry)
+        demandZoneLow = math.min(supportLevel, support2)
+        
+        // Define Supply Zone (resistance areas where sellers are likely active)
+        supplyZoneHigh = math.max(resistanceLevel, resistance2)
+        supplyZoneLow = math.min(resistanceLevel, safeSellEntry)
+        
+        // Create recommendation text
+        supplyDemandText = "📊 TRADING ZONES:\n\n"
+        
+        // Supply Zone Info
+        supplyDemandText += "SUPPLY ZONE (Sell Area):\n"
+        supplyDemandText += str.tostring(supplyZoneLow, "#.##") + " to " + str.tostring(supplyZoneHigh, "#.##") + "\n\n"
+        
+        // Demand Zone Info
+        supplyDemandText += "DEMAND ZONE (Buy Area):\n"
+        supplyDemandText += str.tostring(demandZoneLow, "#.##") + " to " + str.tostring(demandZoneHigh, "#.##") + "\n\n"
+        
+        // Add specific recommendations based on current price and trend
+        supplyDemandText += "RECOMMENDATION:\n"
+        
+        if current_trend == "BULLISH" and higher_tf_trend == "BULLISH"
+            if close < demandZoneHigh
+                supplyDemandText += "✅ STRONG BUY ZONE - Price in demand zone with bullish trend alignment"
+            else if close > supplyZoneLow
+                supplyDemandText += "⚠️ OVERBOUGHT - Wait for pullback to demand zone"
+            else
+                supplyDemandText += "👍 BUY DIP - Wait for price to reach demand zone"
+        else if current_trend == "BEARISH" and higher_tf_trend == "BEARISH"
+            if close > supplyZoneLow
+                supplyDemandText += "✅ STRONG SELL ZONE - Price in supply zone with bearish trend alignment"
+            else if close < demandZoneHigh
+                supplyDemandText += "⚠️ OVERSOLD - Wait for bounce to supply zone"
+            else
+                supplyDemandText += "👍 SELL RALLY - Wait for price to reach supply zone"
+        else if current_trend != higher_tf_trend
+            supplyDemandText += "⚠️ CONFLICTING TRENDS - Trade with caution, smaller position sizes recommended"
+            
+        // Display best entry points based on current conditions
+        supplyDemandText += "\n\nBEST ENTRIES:\n"
+        
+        if current_trend == "BULLISH"
+            supplyDemandText += "BUY: " + str.tostring(safeBuyEntry, "#.##") + "\n"
+            supplyDemandText += "Target: " + str.tostring(safeBuyTP2, "#.##")
+        else
+            supplyDemandText += "SELL: " + str.tostring(safeSellEntry, "#.##") + "\n"
+            supplyDemandText += "Target: " + str.tostring(safeSellTP2, "#.##")
+        
+        // Set the label
+        label.set_xy(supplyDemandLabel, bar_index - 60, (high + low) / 2)
+        label.set_text(supplyDemandLabel, supplyDemandText)
+        label.set_textcolor(supplyDemandLabel, color.white)
+        label.set_color(supplyDemandLabel, color.new(color.black, 20))
