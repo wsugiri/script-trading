@@ -501,7 +501,7 @@ if barstate.islast
     table.cell(infoTable, 0, 8, current_trend + " " + trendChangeText, text_color=trendColor, bgcolor=color.new(color.black, 0))
     table.merge_cells(infoTable, 0, 8, 3, 8)
 
-
+    
 
 // Display trend change labels on chart if enabled
 if showTrendLabels and showAlertMessages
