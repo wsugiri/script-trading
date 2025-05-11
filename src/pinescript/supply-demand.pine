@@ -1,0 +1,33 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © wsugiri
+
+//@version=6
+indicator("Supply & Demand", overlay = true)
+
+// === INPUT ===
+pivotLen = input.int(40, "Pivot Lookback", minval=5, maxval=250)
+zoneHeightPips = input.int(1, "Zone Height (in pips)", minval=1)
+boxLength = input.int(50, "Box Length (bars)", minval=5, maxval=150)
+showLabels = input.bool(true, "Show Labels?")
+
+// === PIVOT DETECTION ===
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pivotLow  = ta.pivotlow(low, pivotLen, pivotLen)
+
+// === KONVERSI PIPS KE TICK ===
+zoneOffset = zoneHeightPips * 1
+
+// === ZONA SUPPLY ===
+if not na(pivotHigh)
+    var box supplyBox = na
+    supplyBox := box.new(left=bar_index[pivotLen], right=bar_index[pivotLen] + boxLength, top=pivotHigh, bottom=pivotHigh - zoneOffset, border_color=color.red, bgcolor=color.new(color.red, 85))
+    if showLabels
+        label.new(bar_index[pivotLen] + boxLength, pivotHigh, str.tostring(pivotHigh), style=label.style_label_lower_right, color=color.red)
+
+// === ZONA DEMAND ===
+if not na(pivotLow)
+    var box demandBox = na
+    demandBox := box.new(left=bar_index[pivotLen],right=bar_index[pivotLen] + boxLength,top=pivotLow + zoneOffset,bottom=pivotLow,border_color=color.green,bgcolor=color.new(color.green, 85))
+    if showLabels
+        label.new(bar_index[pivotLen] + boxLength, pivotLow, str.tostring(pivotLow), style=label.style_label_upper_right, color=color.green)
+
