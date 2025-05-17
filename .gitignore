@@ -15,6 +15,7 @@ node_modules
 /manifests
 /public
 /temp
+/data
 
 debug.log
 env.*
